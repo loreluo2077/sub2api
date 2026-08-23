@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>上游聚合控制台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark">S2</div>
+      <div class="brand-copy"><h1>上游聚合控制台</h1><p>Sub2API Supplier Console</p></div>
+      <div class="header-status"><span class="status-dot"></span>本地运行</div>
+      <button id="export-all" class="header-button" type="button" disabled>导出全部</button>
+    </header>
+
+    <main class="app-shell">
+      <aside class="supplier-sidebar">
+        <div class="sidebar-heading">
+          <div><span>供应商</span><strong id="supplier-count">0</strong></div>
+          <button id="add-supplier" class="add-button" type="button" aria-label="添加供应商" title="添加供应商">+</button>
+        </div>
+        <div id="supplier-list" class="supplier-list"></div>
+        <div id="supplier-empty" class="sidebar-empty">暂无供应商</div>
+        <div class="sidebar-footer">
+          <span>凭据不会持久化</span>
+          <span id="last-refresh">尚未同步</span>
+        </div>
+      </aside>
+
+      <section class="main-panel">
+        <div id="welcome-state" class="welcome-state">
+          <div class="welcome-graphic"><span></span><span></span><span></span><span></span></div>
+          <h2>把上游放到同一张工作台</h2>
+          <p>添加一个供应商并同步数据，随后可统一查看余额、分组、模型、用量与服务状态。</p>
+          <button id="welcome-add" class="primary-button" type="button">添加第一个供应商</button>
+        </div>
+
+        <div id="dashboard" hidden>
+          <div class="dashboard-heading">
+            <div>
+              <div class="eyebrow">当前供应商</div>
+              <h2 id="dashboard-name">-</h2>
+              <p id="dashboard-url">-</p>
+            </div>
+            <div class="dashboard-actions">
+              <span id="sync-state" class="sync-state">未同步</span>
+              <button id="sync-current" class="primary-button" type="button">同步数据</button>
+              <button id="edit-current" class="secondary-button" type="button">编辑</button>
+              <button id="remove-current" class="icon-action danger" type="button" aria-label="删除供应商" title="删除供应商">×</button>
+            </div>
+          </div>
+
+          <div id="dashboard-empty" class="dashboard-empty">
+            <h3>等待首次同步</h3>
+            <p>同步后，这里会展示该供应商的账户和服务数据。</p>
+          </div>
+
+          <div id="dashboard-content" hidden>
+            <div class="metric-grid">
+              <article><span>账户余额</span><strong id="metric-balance">-</strong><small id="metric-user">-</small></article>
+              <article><span>可用分组</span><strong id="metric-groups">0</strong><small id="metric-platforms">0 个平台</small></article>
+              <article><span>API Keys</span><strong id="metric-keys">0</strong><small id="metric-active-keys">0 个启用</small></article>
+              <article><span>数据完整度</span><strong id="metric-health">0%</strong><small id="metric-resource-state">0 / 0 项</small></article>
+            </div>
+
+            <nav id="view-tabs" class="view-tabs" aria-label="数据视图">
+              <button data-view="overview" class="active" type="button">总览</button>
+              <button data-view="groups" type="button">分组</button>
+              <button data-view="channels" type="button">渠道与模型</button>
+              <button data-view="usage" type="button">用量</button>
+              <button data-view="subscriptions" type="button">订阅</button>
+              <button data-view="raw" type="button">原始数据</button>
+            </nav>
+
+            <div class="view-toolbar">
+              <input id="data-search" type="search" placeholder="搜索当前视图" />
+              <button id="export-current" class="secondary-button" type="button">导出当前供应商</button>
+            </div>
+            <div id="view-content" class="view-content"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="supplier-dialog">
+      <form id="supplier-form" method="dialog" autocomplete="off">
+        <div class="dialog-header">
+          <div><span class="eyebrow">供应商连接</span><h2 id="dialog-title">添加供应商</h2></div>
+          <button id="close-dialog" class="icon-action" type="button" aria-label="关闭" title="关闭">×</button>
+        </div>
+        <div class="form-grid">
+          <label><span>供应商名称</span><input id="supplier-name" name="supplierName" placeholder="例如：华东节点" required /></label>
+          <label><span>站点地址</span><input id="base-url" name="baseUrl" type="url" placeholder="https://api.example.com" required /></label>
+          <label><span>登录邮箱</span><input id="email" name="email" type="email" autocomplete="username" required /></label>
+          <label>
+            <span>登录密码</span>
+            <div class="password-field"><input id="password" name="password" type="password" autocomplete="current-password" required /><button id="toggle-password" type="button">查看</button></div>
+          </label>
+          <section id="two-factor-section" class="two-factor" hidden>
+            <div><strong>需要两步验证</strong><span id="masked-email"></span></div>
+            <label><span>6 位验证码</span><input id="totp-code" name="totpCode" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" placeholder="000000" /></label>
+          </section>
+          <details>
+            <summary>验证码参数</summary>
+            <div class="advanced-grid">
+              <label><span>Turnstile / 阿里云凭证</span><input name="turnstileToken" /></label>
+              <label><span>腾讯 Ticket</span><input name="tencentCaptchaTicket" /></label>
+              <label><span>腾讯 Randstr</span><input name="tencentCaptchaRandstr" /></label>
+            </div>
+          </details>
+        </div>
+        <div id="form-error" class="form-error" hidden></div>
+        <div class="dialog-footer">
+          <p>仅保存名称、地址和邮箱。密码与 Token 只存在于本次同步请求。</p>
+          <button id="submit-supplier" class="primary-button" type="submit">连接并同步</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

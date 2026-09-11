@@ -1,0 +1,6 @@
+上游来源 = LiteLLM 官方定价文件 BerriAI/litellm/model_prices_and_context_window.json
+Wei-Shaw/model-price-repo 通过 GitHub Actions 每 10 分钟从上面同步，用 config.json 里的规则裁剪 + 注入 custom_models/aliases，输出 model_prices_and_context_window.json（本身不含价格主体的官方定义，只含覆盖）
+sub2api 消费：
+config.go:2288 配 pricing.remote_url → 拉 Wei-Shaw/model-price-repo 的 model_prices_and_context_window.json
+本地兜底 backend/resources/model-pricing/model_prices_and_context_window.json
+运行时代码里的静态 fallback（pricing_service.go:40 起）作为最后手段

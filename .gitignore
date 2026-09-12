@@ -157,3 +157,8 @@ output/
 .vite/
 # 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
 /plugins/
+
+# 分组同步工具的本地 SQLite 数据库（含账号密码明文，不入库）
+/tools/group-sync-web/data.db
+/tools/group-sync-web/data.db-*
+/tools/group-sync-web/data.db-journal

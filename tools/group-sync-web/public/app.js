@@ -7,10 +7,13 @@ const elements = {
   dialog: $('#site-dialog'), form: $('#site-form'), dialogTitle: $('#site-dialog-title'), formError: $('#site-form-error'),
   siteKind: $('#site-kind'), siteName: $('#site-name'), siteUrl: $('#site-url'), siteEmail: $('#site-email'), sitePassword: $('#site-password'),
   siteRmbPerUsd: $('#site-rmb-per-usd'),
-  siteHasPassword: $('#site-has-password'), togglePassword: $('#toggle-site-password'), saveSyncSite: $('#save-sync-site'),
+  siteModePassword: $('#site-mode-password'), siteModeToken: $('#site-mode-token'), sitePasswordWrap: $('#site-password-wrap'), siteTokenWrap: $('#site-token-wrap'),
+  siteToken: $('#site-token'), siteTokenHelp: $('#site-token-help'),
+  siteHasPassword: $('#site-has-password'), siteHasToken: $('#site-has-token'), togglePassword: $('#toggle-site-password'), saveSyncSite: $('#save-sync-site'), testLoginBtn: $('#test-login'),
   metricBalance: $('#metric-balance'), metricUser: $('#metric-user'), metricGroups: $('#metric-groups'), metricPlatforms: $('#metric-platforms'),
   metricKeys: $('#metric-keys'), metricActiveKeys: $('#metric-active-keys'), metricHealth: $('#metric-health'), metricResourceState: $('#metric-resource-state'),
   tabs: $('#view-tabs'), search: $('#data-search'), viewContent: $('#view-content'), exportAll: $('#export-all'), exportCurrent: $('#export-current'), toast: $('#toast'),
+  openCompare: $('#open-compare'), comparePanel: $('#compare-panel'), compareTabs: $('#compare-tabs'), compareSearch: $('#compare-search'), compareContent: $('#compare-content'), compareBack: $('#compare-back'),
   wizardOpen: $('#group-key-wizard-open'), importOpen: $('#import-account-open'), syncCurrent: $('#sync-current'),
 }
 
@@ -23,7 +26,11 @@ const resourceLabels = {
 let sites = []
 let selectedId = ''
 let currentView = 'overview'
+let mainView = 'workbench'
+let compareView = 'model-compare'
 let editingId = ''
+let officialPrices = {}
+let officialPricesLoaded = false
 let toastTimer
 let autoRefreshInFlight = false
 
@@ -87,6 +94,8 @@ function renderSiteList() {
 
 function renderShell() {
   renderSiteList()
+  renderMain()
+  if (mainView === 'compare') return
   const site = selectedSite()
   elements.welcome.hidden = Boolean(site)
   elements.dashboard.hidden = !site
@@ -128,14 +137,14 @@ function renderShell() {
     elements.dashboardContent.hidden = true
     elements.dashboardEmpty.innerHTML = site.loading
       ? '<h3>加载中…</h3><p>正在实时拉取该站点数据。</p>'
-      : `<h3>尚未同步</h3><p>点击「刷新数据」实时拉取余额、分组、用量等数据。${site.has_password ? '' : '<br/>该站点未保存密码，请先编辑填写登录密码。'}</p>`
+      : `<h3>尚未同步</h3><p>点击「刷新数据」实时拉取余额、分组、用量等数据。${site.has_password || site.has_token ? '' : '<br/>该站点未保存密码/凭据，请先编辑填写。'}</p>`
   }
 }
 
 async function refreshSite(siteId) {
   const site = sites.find((item) => item.id === siteId)
   if (!site) return
-  if (!site.has_password) { showToast('该站点未保存密码，请先编辑填写'); renderShell(); return }
+  if (!site.has_password && !site.has_token) { showToast('该站点未保存密码/凭据，请先编辑填写'); renderShell(); return }
   site.loading = true
   renderShell()
   try {
@@ -157,20 +166,21 @@ async function refreshSite(siteId) {
 function selectSite(id) {
   selectedId = id
   currentView = 'overview'
+  mainView = 'workbench'
   elements.search.value = ''
   renderShell()
-  if (sites.find((site) => site.id === id)?.has_password) refreshSite(id)
+  if (sites.find((site) => site.id === id)?.has_password || sites.find((site) => site.id === id)?.has_token) refreshSite(id)
 }
 
 // 顺序刷新所有未加载的上游站点（避免并发触发风控）
 async function refreshAllSuppliers() {
   const suppliers = sites.filter((site) => site.kind === 'supplier' && !site.live)
-  if (suppliers.length === 0) { renderView(); return }
+  if (suppliers.length === 0) { renderCompare(); return }
   showToast(`正在刷新 ${suppliers.length} 个上游站点...`)
   for (const site of suppliers) {
     await refreshSite(site.id)
   }
-  renderView()
+  renderCompare()
 }
 
 function renderDashboard(result) {
@@ -183,7 +193,7 @@ function table(headers, rows) {
   return `<div class="data-table"><table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`
 }
 function queryMatches(values) {
-  const query = elements.search.value.trim().toLowerCase()
+  const query = (mainView === 'compare' ? elements.compareSearch : elements.search).value.trim().toLowerCase()
   return !query || values.some((value) => String(value ?? '').toLowerCase().includes(query))
 }
 function renderOverview(result) {
@@ -239,62 +249,166 @@ function renderSubscriptions(result) {
 }
 function renderRaw(result) { return `<pre class="raw-json">${escapeHtml(JSON.stringify(result, null, 2))}</pre>` }
 
-// ---------- 价格计算辅助 ----------
-function perMtok(usdPerToken) {
-  return usdPerToken != null ? usdPerToken * 1_000_000 : null
-}
-function realPriceRmb(officialUsdPerToken, multiplier, rmbPerUsd) {
-  if (officialUsdPerToken == null) return null
-  return perMtok(officialUsdPerToken) * (multiplier ?? 1) * (rmbPerUsd ?? 7)
-}
-function formatRmb(value) {
+// ---------- 价格计算辅助（统一美元计价） ----------
+function formatUsd(value) {
   if (value == null || !Number.isFinite(value)) return '-'
-  return value >= 100 ? `¥${value.toFixed(0)}` : `¥${value.toFixed(2)}`
+  if (value === 0) return '$0'
+  if (value >= 100) return `$${value.toFixed(0)}`
+  if (value >= 1) return `$${value.toFixed(2)}`
+  if (value >= 0.01) return `$${value.toFixed(3)}`
+  return `$${value.toFixed(4)}`
 }
 
-// 遍历 supplier 站点，聚合模型×分组矩阵
+function formatRmb(value) {
+  if (value == null || !Number.isFinite(value)) return '-'
+  if (value === 0) return '¥0'
+  if (value >= 100) return `¥${value.toFixed(0)}`
+  if (value >= 1) return `¥${value.toFixed(2)}`
+  if (value >= 0.01) return `¥${value.toFixed(3)}`
+  return `¥${value.toFixed(4)}`
+}
+
+async function loadOfficialPrices() {
+  try {
+    const result = await apiRequest('/api/official-prices')
+    officialPrices = result.prices || {}
+    officialPricesLoaded = true
+  } catch {
+    officialPricesLoaded = true
+  }
+}
+
+// 官方价查询：本地价目表优先，缺失时用任一站点 model_plaza official_pricing 补齐
+function getOfficialPrice(modelName) {
+  const name = String(modelName || '').toLowerCase()
+  if (officialPrices[name]) return officialPrices[name]
+  for (const site of sites) {
+    if (site.kind !== 'supplier' || !site.live) continue
+    const groups = site.live.resources?.model_plaza?.data?.groups || []
+    for (const group of groups) {
+      for (const model of group.models || []) {
+        if (String(model.name || '').toLowerCase() !== name) continue
+        const p = model.official_pricing || {}
+        return {
+          input: p.input_price != null ? p.input_price * 1_000_000 : null,
+          output: p.output_price != null ? p.output_price * 1_000_000 : null,
+          cacheWrite: p.cache_write_price != null ? p.cache_write_price * 1_000_000 : null,
+          cacheRead: p.cache_read_price != null ? p.cache_read_price * 1_000_000 : null,
+        }
+      }
+    }
+  }
+  return null
+}
+
+function discountPct(official, real) {
+  if (official == null || real == null || !Number.isFinite(official) || official <= 0) return null
+  return (official - real) / official * 100
+}
+
+function discountTag(pct) {
+  if (pct == null || !Number.isFinite(pct)) return '-'
+  const rounded = Math.round(Math.abs(pct))
+  if (pct > 0.05) return `<span class="tag save">省 ${rounded}%</span>`
+  if (pct < -0.05) return `<span class="tag expensive">贵 ${rounded}%</span>`
+  return '<span class="tag">持平</span>'
+}
+
+// 遍历 supplier 站点，从用量明细反推「站点 × 分组 × 模型」分类型实测单价与倍率
+function collectUsageLogs(site) {
+  const logs = []
+  for (const key of ['usage_logs', 'usage_logs_page2']) {
+    const resource = site.live.resources?.[key]
+    const data = resource?.status === 'ok' ? resource.data : null
+    const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : []
+    logs.push(...items)
+  }
+  return logs
+}
+
 function collectModelMatrix() {
   const rows = []
   for (const site of sites) {
     if (site.kind !== 'supplier' || !site.live) continue
-    const groups = site.live.resources.model_plaza?.data?.groups || []
-    for (const group of groups) {
-      const multiplier = group.user_rate_multiplier ?? group.rate_multiplier
-      const rmbPerUsd = site.rmb_per_usd ?? 7
-      for (const model of group.models || []) {
-        const pricing = model.official_pricing || {}
-        const inputUsd = pricing.input_price != null ? pricing.input_price : null
-        const outputUsd = pricing.output_price != null ? pricing.output_price : null
-        rows.push({
-          siteId: site.id,
-          siteName: site.name,
-          groupId: group.id,
-          groupName: group.name,
-          modelName: String(model.name || '').toLowerCase(),
-          displayName: model.name,
-          platform: model.platform || group.platform || '-',
-          multiplier,
-          rmbPerUsd,
-          officialInput: inputUsd,
-          officialOutput: outputUsd,
-          realInput: realPriceRmb(inputUsd, multiplier, rmbPerUsd),
-          realOutput: realPriceRmb(outputUsd, multiplier, rmbPerUsd),
-        })
+    const logs = collectUsageLogs(site)
+    if (!logs.length) continue
+    const byKey = new Map()
+    for (const log of logs) {
+      const name = String(log.model || '').trim()
+      if (!name) continue
+      const groupId = log.group_id ?? log.group?.id ?? ''
+      const key = `${groupId}|${name}`
+      let entry = byKey.get(key)
+      if (!entry) {
+        entry = {
+          groupId,
+          groupName: log.group?.name || (groupId != null && groupId !== '' ? `#${groupId}` : '-'),
+          platform: log.group?.platform || '-',
+          modelName: name.toLowerCase(),
+          displayName: name,
+          requests: 0,
+          inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0,
+          inputCost: 0, outputCost: 0, cacheWriteCost: 0, cacheReadCost: 0,
+          multipliers: [],
+        }
+        byKey.set(key, entry)
       }
+      entry.requests += 1
+      entry.inputTokens += Number(log.input_tokens) || 0
+      entry.outputTokens += Number(log.output_tokens) || 0
+      entry.cacheWriteTokens += Number(log.cache_creation_tokens) || 0
+      entry.cacheReadTokens += Number(log.cache_read_tokens) || 0
+      entry.inputCost += Number(log.input_cost) || 0
+      entry.outputCost += Number(log.output_cost) || 0
+      entry.cacheWriteCost += Number(log.cache_creation_cost) || 0
+      entry.cacheReadCost += Number(log.cache_read_cost) || 0
+      const mult = Number(log.rate_multiplier)
+      if (Number.isFinite(mult) && mult > 0) entry.multipliers.push(mult)
+    }
+    for (const entry of byKey.values()) {
+      const { inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens, inputCost, outputCost, cacheWriteCost, cacheReadCost } = entry
+      const totalTokens = inputTokens + outputTokens + cacheWriteTokens + cacheReadTokens
+      if (!totalTokens) continue
+      const unit = (cost, tokens) => tokens > 0 && Number.isFinite(cost) ? cost / tokens * 1_000_000 : null
+      const multMode = entry.multipliers.length
+        ? [...new Set(entry.multipliers)].map((m) => [m, entry.multipliers.filter((x) => x === m).length]).sort((a, b) => b[1] - a[1])[0][0]
+        : null
+      const baseInputPrice = unit(inputCost, inputTokens)
+      const baseOutputPrice = unit(outputCost, outputTokens)
+      const baseCacheWritePrice = unit(cacheWriteCost, cacheWriteTokens)
+      const baseCacheReadPrice = unit(cacheReadCost, cacheReadTokens)
+      const official = getOfficialPrice(entry.modelName)
+      const mult = multMode != null ? multMode : 1
+      const rate = site.rmb_per_usd ?? 7
+      const realInput = baseInputPrice != null ? baseInputPrice * mult / rate : null
+      const realOutput = baseOutputPrice != null ? baseOutputPrice * mult / rate : null
+      const realCacheWrite = baseCacheWritePrice != null ? baseCacheWritePrice * mult / rate : null
+      const realCacheRead = baseCacheReadPrice != null ? baseCacheReadPrice * mult / rate : null
+      rows.push({
+        siteId: site.id,
+        siteName: site.name,
+        groupId: entry.groupId,
+        groupName: entry.groupName,
+        platform: entry.platform,
+        modelName: entry.modelName,
+        displayName: entry.displayName,
+        requests: entry.requests,
+        totalTokens,
+        rmbPerUsd: site.rmb_per_usd ?? 7,
+        multiplier: multMode,
+        baseInputPrice,
+        baseOutputPrice,
+        baseCacheWritePrice,
+        baseCacheReadPrice,
+        official,
+        discountInput: discountPct(official?.input, realInput),
+        discountOutput: discountPct(official?.output, realOutput),
+        discountCacheWrite: discountPct(official?.cacheWrite, realCacheWrite),
+        discountCacheRead: discountPct(official?.cacheRead, realCacheRead),
+      })
     }
   }
   return rows
-}
-
-function highlightCell(value, values) {
-  if (value == null || !values.length) return ''
-  const numeric = values.filter((v) => v != null && Number.isFinite(v))
-  if (!numeric.length) return ''
-  const min = Math.min(...numeric)
-  const max = Math.max(...numeric)
-  if (Math.abs(value - min) < 1e-9) return ' class="price-low"'
-  if (Math.abs(value - max) < 1e-9) return ' class="price-high"'
-  return ''
 }
 
 // ---------- 站点对比视图 ----------
@@ -309,6 +423,7 @@ function renderSiteCompare() {
     const platforms = [...new Set(groups.map((g) => g.platform).filter(Boolean))]
     const summary = site.live.summary || {}
     const health = summary.total_resources ? Math.round(summary.successful_resources / summary.total_resources * 100) : null
+    if (!queryMatches([site.name, ...platforms])) return null
     return `<tr>
       <td class="primary-text">${escapeHtml(site.name)}</td>
       <td>${platforms.map((p) => `<span class="tag blue">${escapeHtml(p)}</span>`).join(' ') || '-'}</td>
@@ -320,99 +435,119 @@ function renderSiteCompare() {
     </tr>`
   })
   const toolbar = `<div class="compare-toolbar"><button id="refresh-all-sites" class="secondary-button" type="button">一键刷新全部</button></div>`
-  return toolbar + table(['上游站点', '平台分布', '分组数', '余额', '充值汇率', '最近同步', '数据完整度'], rows)
+  return toolbar + table(['上游站点', '平台分布', '分组数', '余额', '充值汇率', '最近同步', '数据完整度'], rows.filter(Boolean))
 }
 
 // ---------- 模型对比视图 ----------
 let modelCompareRows = []
 let selectedModel = ''
 
+function supplierUsageStatus(site) {
+  if (site.kind !== 'supplier') return null
+  if (!site.live) return 'no-sync'
+  const logs = collectUsageLogs(site)
+  if (logs.length) return 'ok'
+  const resource = site.live.resources?.usage_logs
+  if (resource && resource.status === 'error') return 'error'
+  if (!site.live.resources?.usage_snapshot) return 'no-sync'
+  return 'empty'
+}
+
+// 某价格类型的 4 行堆叠：官方价格 / 实际基价 / 倍率价格 / 真实价格
+function priceCell(r, type) {
+  const baseKey = { input: 'baseInputPrice', output: 'baseOutputPrice', cacheWrite: 'baseCacheWritePrice', cacheRead: 'baseCacheReadPrice' }[type]
+  const discKey = { input: 'discountInput', output: 'discountOutput', cacheWrite: 'discountCacheWrite', cacheRead: 'discountCacheRead' }[type]
+  const base = r[baseKey]
+  const mult = r.multiplier != null ? r.multiplier : 1
+  const rate = r.rmbPerUsd ?? 7
+  const scaled = (v) => v != null && Number.isFinite(v) ? v * mult : null
+  const official = r.official ? r.official[type] : null
+  const realUsd = base != null ? base * mult / rate : null
+  const realRmb = realUsd != null ? realUsd * 7 : null
+  return `<div class="price-stack">
+    <span class="ps-official">官方价格 ${formatUsd(official)}</span>
+    <span class="ps-base">实际基价 ${formatUsd(base)}</span>
+    <span class="ps-mult">倍率价格 ${formatUsd(scaled(base))}</span>
+    <span class="ps-rate">真实价格 ${formatUsd(realUsd)}（${formatRmb(realRmb)}） ${discountTag(r[discKey])}</span>
+  </div>`
+}
+
 function renderModelCompare() {
   modelCompareRows = collectModelMatrix()
+  const suppliers = sites.filter((site) => site.kind === 'supplier')
+  const statusRows = suppliers.map((site) => {
+    const state = supplierUsageStatus(site)
+    const label = {
+      ok: '<span class="tag">有用量数据</span>',
+      empty: '<span class="tag blue">无用量</span>',
+      unavailable: '<span class="tag red">未同步</span>',
+      error: '<span class="tag red">获取失败</span>',
+      'no-sync': '<span class="tag">未同步</span>',
+    }[state] || ''
+    return `<span><strong>${escapeHtml(site.name)}</strong>${label}</span>`
+  }).join('')
+  const statusNote = `<div class="official-price">数据来源：${statusRows || '暂无上游站点'}</div>`
+
+  const refreshBtn = `<button id="refresh-all-sites" class="secondary-button" type="button">一键刷新全部</button>`
+  const toolbarInner = `<div class="compare-toolbar-right">${refreshBtn}</div>`
+
   if (!modelCompareRows.length) {
-    return `<div class="empty-view">暂无可对比的模型数据。请先刷新上游站点。</div>`
+    return `<div class="compare-toolbar">${toolbarInner}</div>${statusNote}<div class="empty-view">暂无可对比的模型数据。请先刷新上游站点。</div>`
   }
   const modelNames = [...new Set(modelCompareRows.map((r) => r.modelName))].sort()
+  const filteredNames = modelNames.filter((name) => queryMatches([name]))
   const options = `<option value="">全部模型</option>` + modelNames.map((name) => `<option value="${escapeHtml(name)}" ${name === selectedModel ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')
 
   let body
   if (!selectedModel) {
-    body = renderAllModelsSummary(modelNames)
+    body = renderAllModelsSummary(filteredNames)
   } else {
     body = renderSingleModelCompare(selectedModel)
   }
 
   return `<div class="compare-toolbar">
       <label class="model-select"><span>模型选择</span><select id="model-compare-select">${options}</select></label>
-    </div>${body}`
+      ${toolbarInner}
+    </div>${statusNote}${body}`
 }
 
 function renderSingleModelCompare(modelName) {
-  const rows = modelCompareRows.filter((r) => r.modelName === modelName)
+  const rows = modelCompareRows.filter((r) => r.modelName === modelName).filter((r) => queryMatches([r.siteName, r.displayName, r.groupName]))
   if (!rows.length) return '<div class="empty-view">该模型没有可用数据</div>'
-  const sample = rows.find((r) => r.officialInput != null || r.officialOutput != null)
-  const officialNote = sample
-    ? `<div class="official-price">官方基准价：输入 $${perMtok(sample.officialInput)?.toFixed(2) ?? '-'} / 输出 $${perMtok(sample.officialOutput)?.toFixed(2) ?? '-'}（每百万 token, USD）</div>`
-    : '<div class="official-price">官方基准价缺失</div>'
 
-  const priceValues = { input: rows.map((r) => r.realInput), output: rows.map((r) => r.realOutput) }
-  const rowHtml = rows.map((r) => {
-    const missing = r.officialInput == null && r.officialOutput == null
-    const rateCell = r.multiplier != null
-      ? (r.user_rate_multiplier != null ? escapeHtml(r.multiplier) : `${escapeHtml(r.multiplier)} <span class="tag">默认</span>`)
-      : '-'
-    const inputCell = missing
-      ? '<span class="tag red">官方价缺失</span>'
-      : `<span${highlightCell(r.realInput, priceValues.input)}>${formatRmb(r.realInput)}</span>`
-    const outputCell = missing
-      ? '<span class="tag red">官方价缺失</span>'
-      : `<span${highlightCell(r.realOutput, priceValues.output)}>${formatRmb(r.realOutput)}</span>`
-    return `<tr>
-      <td class="primary-text">${escapeHtml(r.siteName)}</td>
-      <td>${escapeHtml(r.groupName)}<span class="tag blue">${escapeHtml(r.platform)}</span></td>
-      <td>${rateCell}</td>
-      <td>${escapeHtml(r.rmbPerUsd)}</td>
-      <td>${inputCell}</td>
-      <td>${outputCell}</td>
-    </tr>`
-  })
+  const rowHtml = rows.map((r) => `<tr>
+    <td class="primary-text">${escapeHtml(r.siteName)}</td>
+    <td>${escapeHtml(r.groupName)}<span class="tag blue">${escapeHtml(r.platform)}</span></td>
+    <td>${r.multiplier != null ? `${escapeHtml(r.multiplier)}×` : '-'}</td>
+    <td>${escapeHtml(r.rmbPerUsd ?? 7)}</td>
+    <td>${priceCell(r, 'input')}</td>
+    <td>${priceCell(r, 'output')}</td>
+    <td>${priceCell(r, 'cacheWrite')}</td>
+    <td>${priceCell(r, 'cacheRead')}</td>
+    <td>${r.requests}</td>
+  </tr>`)
 
-  const lowest = rows.filter((r) => r.realInput != null).sort((a, b) => a.realInput - b.realInput)[0]
-  const highest = rows.filter((r) => r.realInput != null).sort((a, b) => b.realInput - a.realInput)[0]
-  const rates = rows.map((r) => r.multiplier).filter((v) => v != null)
-  const rateRange = rates.length ? `${Math.min(...rates)} ~ ${Math.max(...rates)}` : '-'
-  const summaryHtml = `<div class="compare-summary">
-    <div>最低：${lowest ? `${escapeHtml(lowest.siteName)}/${escapeHtml(lowest.groupName)} 输入 ${formatRmb(lowest.realInput)} 输出 ${formatRmb(lowest.realOutput)}` : '-'}</div>
-    <div>最高：${highest ? `${escapeHtml(highest.siteName)}/${escapeHtml(highest.groupName)} 输入 ${formatRmb(highest.realInput)} 输出 ${formatRmb(highest.realOutput)}` : '-'}</div>
-    <div>倍率范围：${escapeHtml(rateRange)}</div>
-  </div>`
-
-  return officialNote + summaryHtml + table(['上游站点', '分组名', '倍率', '充值汇率', '输入 RMB/百万token', '输出 RMB/百万token'], rowHtml)
+  const headers = ['上游站点', '分组', '价格倍率', '充值倍率', '输入', '输出', '缓存写入', '缓存读取', '请求数']
+  return table(headers, rowHtml)
 }
 
 function renderAllModelsSummary(modelNames) {
   const sections = modelNames.map((name) => {
     const rows = modelCompareRows.filter((r) => r.modelName === name)
-    const withPrice = rows.filter((r) => r.realInput != null)
-    let summary
-    if (!withPrice.length) {
-      summary = '<span class="tag red">官方价缺失</span>'
-    } else {
-      const lowest = withPrice.sort((a, b) => a.realInput - b.realInput)[0]
-      summary = `<span class="price-low">${formatRmb(lowest.realInput)}</span> · ${escapeHtml(lowest.siteName)}/${escapeHtml(lowest.groupName)}`
-    }
-    const rowsHtml = rows.map((r) => {
-      const missing = r.officialInput == null && r.officialOutput == null
-      return `<tr>
-        <td class="primary-text">${escapeHtml(r.siteName)}</td>
-        <td>${escapeHtml(r.groupName)}<span class="tag blue">${escapeHtml(r.platform)}</span></td>
-        <td>${r.multiplier != null ? escapeHtml(r.multiplier) : '-'}</td>
-        <td>${missing ? '<span class="tag red">官方价缺失</span>' : `${formatRmb(r.realInput)} / ${formatRmb(r.realOutput)}`}</td>
-      </tr>`
-    }).join('')
+    const rowsHtml = rows.map((r) => `<tr>
+      <td class="primary-text">${escapeHtml(r.siteName)}</td>
+      <td>${escapeHtml(r.groupName)}<span class="tag blue">${escapeHtml(r.platform)}</span></td>
+      <td>${r.multiplier != null ? `${escapeHtml(r.multiplier)}×` : '-'}</td>
+      <td>${escapeHtml(r.rmbPerUsd ?? 7)}</td>
+      <td>${priceCell(r, 'input')}</td>
+      <td>${priceCell(r, 'output')}</td>
+      <td>${priceCell(r, 'cacheWrite')}</td>
+      <td>${priceCell(r, 'cacheRead')}</td>
+      <td>${r.requests}</td>
+    </tr>`).join('')
     return `<details class="model-detail" open>
-      <summary><strong>${escapeHtml(name)}</strong><span class="model-summary">${summary}</span><span class="model-count">${rows.length} 组</span></summary>
-      <div class="data-table"><table><thead><tr><th>上游站点</th><th>分组名</th><th>倍率</th><th>输入/输出 RMB（百万token）</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
+      <summary><strong>${escapeHtml(name)}</strong><span class="model-count">${rows.length} 个组合</span></summary>
+      <div class="data-table"><table><thead><tr><th>上游站点</th><th>分组</th><th>价格倍率</th><th>充值倍率</th><th>输入</th><th>输出</th><th>缓存写入</th><th>缓存读取</th><th>请求数</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
     </details>`
   }).join('')
   return `<div class="model-list">${sections}</div>`
@@ -420,68 +555,138 @@ function renderAllModelsSummary(modelNames) {
 
 function renderView() {
   const result = selectedSite()?.live
+  if (!result) { elements.viewContent.innerHTML = ''; return }
   const renderers = {
     overview: renderOverview, groups: renderGroups, channels: renderChannels, usage: renderUsage,
     subscriptions: renderSubscriptions, raw: renderRaw,
-    modelCompare: () => renderModelCompare(),
-    siteCompare: () => renderSiteCompare(),
   }
   const renderer = renderers[currentView]
   try {
-    if (currentView === 'model-compare' || currentView === 'site-compare') {
-      elements.viewContent.innerHTML = renderer ? renderer() : ''
-    } else {
-      if (!result) { elements.viewContent.innerHTML = ''; return }
-      elements.viewContent.innerHTML = renderer ? renderer(result) : ''
-    }
+    elements.viewContent.innerHTML = renderer ? renderer(result) : ''
   } catch (error) {
     elements.viewContent.innerHTML = `<div class="empty-view">视图渲染出错：${escapeHtml(error?.message || error)}</div>`
   }
-  if (currentView === 'site-compare') {
-    const button = document.querySelector('#refresh-all-sites')
-    if (button) button.addEventListener('click', refreshAllSuppliers)
+}
+
+// ---------- 对比分析（独立于站点工作台） ----------
+function switchMainView(view) {
+  mainView = view
+  renderShell()
+}
+
+function renderMain() {
+  const isCompare = mainView === 'compare'
+  elements.comparePanel.hidden = !isCompare
+  if (!isCompare) {
+    elements.compareSearch.value = ''
+    return
   }
-  if (currentView === 'model-compare') {
-    const select = document.querySelector('#model-compare-select')
-    if (select) select.addEventListener('change', () => { selectedModel = select.value; renderView() })
+  elements.welcome.hidden = true
+  elements.dashboard.hidden = true
+  renderCompare()
+}
+
+function renderCompare() {
+  elements.compareTabs.querySelectorAll('button').forEach((button) => button.classList.toggle('active', button.dataset.compareView === compareView))
+  try {
+    elements.compareContent.innerHTML = compareView === 'model-compare' ? renderModelCompare() : renderSiteCompare()
+  } catch (error) {
+    elements.compareContent.innerHTML = `<div class="empty-view">视图渲染出错：${escapeHtml(error?.message || error)}</div>`
   }
+  const refreshButton = document.querySelector('#refresh-all-sites')
+  if (refreshButton) refreshButton.addEventListener('click', refreshAllSuppliers)
+  const select = document.querySelector('#model-compare-select')
+  if (select) select.addEventListener('change', () => { selectedModel = select.value; renderCompare() })
 }
 
 // ---------- 站点表单 ----------
+function getSiteLoginMode() {
+  return elements.siteModeToken.checked ? 'token' : 'password'
+}
+function setSiteLoginMode(mode) {
+  const isToken = mode === 'token'
+  elements.siteModeToken.checked = isToken
+  elements.siteModePassword.checked = !isToken
+  elements.sitePasswordWrap.hidden = isToken
+  elements.siteTokenWrap.hidden = !isToken
+  elements.siteTokenHelp.hidden = !isToken
+}
 function openSiteDialog(site = null, initialKind = 'supplier') {
   editingId = site?.id || ''
   elements.dialogTitle.textContent = site ? `编辑 ${site.name}` : '添加站点'
-  elements.form.reset(); elements.formError.hidden = true; elements.siteHasPassword.hidden = true
+  elements.form.reset(); elements.formError.hidden = true; elements.siteHasPassword.hidden = true; elements.siteHasToken.hidden = true
   elements.siteKind.value = site?.kind || initialKind
   elements.siteName.value = site?.name || ''
   elements.siteUrl.value = site?.base_url || ''
   elements.siteEmail.value = site?.email || ''
   elements.sitePassword.value = ''
+  elements.siteToken.value = ''
   elements.siteRmbPerUsd.value = site?.rmb_per_usd != null ? site.rmb_per_usd : ''
-  elements.sitePassword.required = !site?.has_password
-  if (site?.has_password) {
-    elements.siteHasPassword.hidden = false
-    elements.sitePassword.placeholder = '已保存，留空保持不变'
+  if (site?.has_token && !site?.has_password) {
+    setSiteLoginMode('token')
+    elements.siteTokenHelp.hidden = true
+    elements.siteToken.placeholder = '已保存，留空保持不变'
+  } else {
+    setSiteLoginMode('password')
+    if (site?.has_password) {
+      elements.siteHasPassword.hidden = false
+      elements.sitePassword.placeholder = '已保存，留空保持不变'
+    }
   }
   elements.dialog.showModal(); setTimeout(() => elements.siteName.focus(), 0)
 }
 function closeSiteDialog() { elements.dialog.close(); editingId = '' }
 
-async function saveSiteFromDialog({ sync }) {
-  elements.formError.hidden = true
+async function collectSiteLoginPayload() {
   const payload = {
     name: elements.siteName.value.trim(),
     kind: elements.siteKind.value,
     baseUrl: elements.siteUrl.value.trim(),
     email: elements.siteEmail.value.trim(),
   }
-  if (elements.sitePassword.value) payload.password = elements.sitePassword.value
+  if (getSiteLoginMode() === 'token') {
+    if (elements.siteToken.value.trim()) payload.access_token = elements.siteToken.value.trim()
+  } else {
+    if (elements.sitePassword.value) payload.password = elements.sitePassword.value
+  }
   const rmb = Number(elements.siteRmbPerUsd.value)
   if (elements.siteRmbPerUsd.value !== '') {
-    if (!Number.isFinite(rmb) || rmb <= 0) { elements.formError.textContent = '充值汇率必须是大于 0 的数字'; elements.formError.hidden = false; return }
+    if (!Number.isFinite(rmb) || rmb <= 0) throw new Error('充值汇率必须是大于 0 的数字')
     payload.rmb_per_usd = rmb
   }
-  if (!payload.name || !payload.baseUrl || !payload.email) { elements.formError.textContent = '请填写站点名称、地址和邮箱'; elements.formError.hidden = false; return }
+  if (!payload.name || !payload.baseUrl || !payload.email) throw new Error('请填写站点名称、地址和邮箱')
+  return payload
+}
+
+async function testLoginFromDialog() {
+  elements.formError.hidden = true
+  try {
+    const payload = await collectSiteLoginPayload()
+    const testPayload = { baseUrl: payload.baseUrl }
+    if (payload.access_token) testPayload.access_token = payload.access_token
+    else { testPayload.email = payload.email; testPayload.password = payload.password || '' }
+    const result = await apiRequest('/api/test-login', { method: 'POST', body: JSON.stringify(testPayload) })
+    elements.formError.textContent = result.ok ? result.message : result.message
+    elements.formError.hidden = false
+    elements.formError.style.color = result.ok ? '#0e7e50' : '#913e3e'
+  } catch (error) {
+    elements.formError.textContent = error.message || '连接失败'
+    elements.formError.hidden = false
+    elements.formError.style.color = '#913e3e'
+  }
+}
+
+async function saveSiteFromDialog({ sync }) {
+  elements.formError.hidden = true
+  elements.formError.style.color = ''
+  let payload
+  try {
+    payload = await collectSiteLoginPayload()
+  } catch (error) {
+    elements.formError.textContent = error.message || '保存失败'
+    elements.formError.hidden = false
+    return
+  }
   try {
     let site
     if (editingId) {
@@ -516,7 +721,8 @@ const wizardElements = {
   dialog: $('#group-key-wizard'), form: $('#wizard-form'), title: $('#wizard-title'), close: $('#close-wizard'),
   sourceName: $('#wizard-source-name'), sourceUrl: $('#wizard-source-url'), sourceEmail: $('#wizard-source-email'),
   sourcePasswordWrap: $('#wizard-source-password-wrap'), sourcePassword: $('#wizard-source-password'), sourceTogglePassword: $('#wizard-toggle-password'),
-  sourceHasPassword: $('#wizard-source-has-password'), sourceError: $('#wizard-source-error'), sourceNext: $('#wizard-source-next'),
+  sourceModePassword: $('#wizard-source-mode-password'), sourceModeToken: $('#wizard-source-mode-token'), sourceTokenWrap: $('#wizard-source-token-wrap'), sourceToken: $('#wizard-source-token'),
+  sourceHasPassword: $('#wizard-source-has-password'), sourceHasToken: $('#wizard-source-has-token'), sourceError: $('#wizard-source-error'), sourceNext: $('#wizard-source-next'),
   onlyMissing: $('#wizard-only-missing'), groupCount: $('#wizard-group-count'), groupList: $('#wizard-group-list'), keyPrefix: $('#wizard-key-prefix'),
   namePreview: $('#wizard-name-preview'), groupsError: $('#wizard-groups-error'), groupsBack: $('#wizard-groups-back'), groupsNext: $('#wizard-groups-next'),
   revealAll: $('#wizard-reveal-all'), hideAll: $('#wizard-hide-all'), keyList: $('#wizard-key-list'), keysError: $('#wizard-keys-error'), keySummary: $('#wizard-key-summary'),
@@ -554,17 +760,45 @@ function openWizard() {
   wizardElements.sourceUrl.value = site.base_url
   wizardElements.sourceEmail.value = site.email
   wizardElements.sourcePassword.value = ''
+  wizardElements.sourceToken.value = ''
   const hasPassword = site.has_password
+  const hasToken = site.has_token
   wizardElements.sourceHasPassword.hidden = !hasPassword
-  wizardElements.sourcePasswordWrap.hidden = hasPassword
-  wizardElements.sourcePassword.required = !hasPassword
-  showWizardPanel('source')
-  wizardElements.dialog.showModal()
-  setTimeout(() => (hasPassword ? wizardElements.sourceNext : wizardElements.sourcePassword).focus(), 0)
+  wizardElements.sourceHasToken.hidden = !hasToken
+  const useToken = hasToken && !hasPassword
+  wizardElements.sourceModeToken.checked = useToken
+  wizardElements.sourceModePassword.checked = !useToken
+  wizardElements.sourcePasswordWrap.hidden = useToken || hasPassword
+  wizardElements.sourceTokenWrap.hidden = !useToken
+  wizardElements.sourcePassword.required = !hasPassword && !hasToken
+  if (useToken) wizardElements.sourceToken.placeholder = '已保存，留空保持不变'
+  if (hasPassword || hasToken) {
+    wizardElements.dialog.showModal()
+    wizardElements.groupList.innerHTML = '<div class="empty-view">正在使用已保存凭据连接上游...</div>'
+    showWizardPanel('groups')
+    connectWizard()
+  } else {
+    showWizardPanel('source')
+    wizardElements.dialog.showModal()
+    setTimeout(() => wizardElements.sourcePassword.focus(), 0)
+  }
 }
 function closeWizard() {
   wizardElements.dialog.close()
   wizardElements.sourcePassword.value = ''
+  wizardElements.sourceToken.value = ''
+}
+function setWizardSourceMode(mode) {
+  const isToken = mode === 'token'
+  const site = selectedSite()
+  const savedPassword = site?.has_password
+  const savedToken = site?.has_token
+  wizardElements.sourceModeToken.checked = isToken
+  wizardElements.sourceModePassword.checked = !isToken
+  wizardElements.sourcePasswordWrap.hidden = isToken || savedPassword
+  wizardElements.sourceTokenWrap.hidden = !isToken
+  wizardElements.sourceHasPassword.hidden = !savedPassword
+  wizardElements.sourceHasToken.hidden = !savedToken
 }
 
 function renderGroupChecklist() {
@@ -620,32 +854,44 @@ function setKeyReveal(reveal) {
   })
 }
 
-async function submitSourceStep() {
+async function connectWizard() {
   hideWizardError('sourceError')
   const site = selectedSite()
   if (!site) return
   const payload = { siteId: site.id }
-  if (!site.has_password) {
+  const isTokenMode = wizardElements.sourceModeToken.checked
+  if (isTokenMode) {
+    const token = wizardElements.sourceToken.value.trim()
+    if (!site.has_token && !token) { showWizardError('sourceError', '请填写该站点的凭据 Token'); return }
+    if (token) payload.access_token = token
+  } else if (!site.has_password) {
     if (!wizardElements.sourcePassword.value) { showWizardError('sourceError', '请填写该站点的登录密码'); return }
     payload.password = wizardElements.sourcePassword.value
   }
   setWizardBusy(wizardElements.sourceNext, true, '连接上游')
   try {
     const result = await apiRequest('/api/prepare-group-keys', { method: 'POST', body: JSON.stringify(payload) })
+    if (!wizardElements.dialog.open) return
     wizard.sessionId = result.sessionId
     wizard.groups = result.groups || []
-    if (payload.password) {
+    if (payload.password || payload.access_token) {
       await loadSites()
       wizardElements.sourceHasPassword.hidden = true
+      wizardElements.sourceHasToken.hidden = true
       wizardElements.sourcePasswordWrap.hidden = true
+      wizardElements.sourceTokenWrap.hidden = true
     }
     renderGroupChecklist()
     showWizardPanel('groups')
   } catch (error) {
     showWizardError('sourceError', error.message || '连接失败')
+    if (wizardElements.dialog.open && wizard.step !== 'source') showWizardPanel('source')
   } finally {
     setWizardBusy(wizardElements.sourceNext, false, '连接上游')
   }
+}
+async function submitSourceStep() {
+  return connectWizard()
 }
 async function submitGroupsStep() {
   hideWizardError('groupsError')
@@ -688,6 +934,8 @@ wizardElements.keyList.addEventListener('click', (event) => {
   button.textContent = revealing ? '隐藏' : '显示'
 })
 wizardElements.sourceTogglePassword.addEventListener('click', () => { const visible = wizardElements.sourcePassword.type === 'text'; wizardElements.sourcePassword.type = visible ? 'password' : 'text'; wizardElements.sourceTogglePassword.textContent = visible ? '查看' : '隐藏' })
+wizardElements.sourceModePassword.addEventListener('change', () => setWizardSourceMode('password'))
+wizardElements.sourceModeToken.addEventListener('change', () => setWizardSourceMode('token'))
 
 // ---------- 导入账号（穿梭框） ----------
 const importDialog = {
@@ -697,12 +945,22 @@ const importDialog = {
   selectAll: $('#import-select-all'), selectNone: $('#import-select-none'), removeSelected: $('#import-remove-selected'),
   moveRight: $('#import-move-right'), moveAllRight: $('#import-move-all-right'), moveLeft: $('#import-move-left'), moveAllLeft: $('#import-move-all-left'),
   passwordWrap: $('#import-password-wrap'), password: $('#import-password'), togglePassword: $('#toggle-import-password'),
+  targetModePassword: $('#import-target-mode-password'), targetModeToken: $('#import-target-mode-token'), targetTokenField: $('#import-target-token-field'), targetToken: $('#import-target-token'), targetTokenHelp: $('#import-target-token-help'), targetPasswordField: $('#import-target-password-field'),
   error: $('#import-error'), cancel: $('#import-cancel'), submit: $('#import-submit'), resultDone: $('#import-result-done'),
   resultTitle: $('#import-result-title'), resultSummary: $('#import-result-summary'), resultList: $('#import-result-list'), footerNote: $('#import-footer-note'),
   sourceSiteId: '',
   keys: [],
   selectedKeys: [],
   results: [],
+}
+
+function setImportTargetMode(mode) {
+  const isToken = mode === 'token'
+  importDialog.targetModeToken.checked = isToken
+  importDialog.targetModePassword.checked = !isToken
+  importDialog.targetTokenField.hidden = !isToken
+  importDialog.targetPasswordField.hidden = isToken
+  importDialog.targetTokenHelp.hidden = !isToken
 }
 
 function openImportDialog() {
@@ -718,7 +976,14 @@ function openImportDialog() {
   importDialog.submit.hidden = false
   importDialog.resultDone.hidden = true
   importDialog.password.value = ''
-  importDialog.passwordWrap.hidden = target.has_password
+  importDialog.targetToken.value = ''
+  importDialog.targetTokenField.hidden = true
+  importDialog.targetTokenHelp.hidden = true
+  importDialog.targetPasswordField.hidden = false
+  importDialog.targetModePassword.checked = true
+  importDialog.targetModeToken.checked = false
+  const targetHasCred = target.has_password || target.has_token
+  importDialog.passwordWrap.hidden = targetHasCred
   importDialog.targetLabel.value = `${target.name} · ${target.email}`
   const suppliers = sites.filter((site) => site.kind === 'supplier')
   importDialog.sourceSelect.innerHTML = `<option value="">— 选择上游站点 —</option>` + suppliers.map((site) => `<option value="${escapeHtml(site.id)}">${escapeHtml(site.name)}</option>`).join('')
@@ -811,17 +1076,22 @@ async function submitImport() {
     siteId: target.id,
     keys: importDialog.selectedKeys.map((key) => ({ name: key.name || key.key, key: key.key, group_name: key.group_name })),
   }
-  if (!target.has_password) {
-    if (!importDialog.password.value) { importDialog.error.textContent = '请填写目标站点登录密码'; importDialog.error.hidden = false; return }
-    payload.password = importDialog.password.value
+  if (!target.has_password && !target.has_token) {
+    if (importDialog.targetModeToken.checked) {
+      if (!importDialog.targetToken.value.trim()) { importDialog.error.textContent = '请填写目标站点凭据 Token'; importDialog.error.hidden = false; return }
+      payload.access_token = importDialog.targetToken.value.trim()
+    } else {
+      if (!importDialog.password.value) { importDialog.error.textContent = '请填写目标站点登录密码'; importDialog.error.hidden = false; return }
+      payload.password = importDialog.password.value
+    }
   }
   importDialog.submit.disabled = true
   importDialog.submit.textContent = '导入中...'
   try {
     const result = await apiRequest('/api/import-keys', { method: 'POST', body: JSON.stringify(payload) })
     importDialog.results = result.results || []
-    if (payload.password) {
-      await apiRequest(`/api/sites/${target.id}`, { method: 'PUT', body: JSON.stringify({ password: payload.password }) })
+    if (payload.password || payload.access_token) {
+      await apiRequest(`/api/sites/${target.id}`, { method: 'PUT', body: JSON.stringify({ password: payload.password || undefined, access_token: payload.access_token || undefined }) })
       await loadSites()
     }
     renderImportResult()
@@ -870,6 +1140,8 @@ importDialog.cancel.addEventListener('click', closeImportDialog)
 importDialog.resultDone.addEventListener('click', closeImportDialog)
 importDialog.submit.addEventListener('click', submitImport)
 importDialog.togglePassword.addEventListener('click', () => { const visible = importDialog.password.type === 'text'; importDialog.password.type = visible ? 'password' : 'text'; importDialog.togglePassword.textContent = visible ? '查看' : '隐藏' })
+importDialog.targetModePassword.addEventListener('change', () => setImportTargetMode('password'))
+importDialog.targetModeToken.addEventListener('change', () => setImportTargetMode('token'))
 
 // ---------- 事件绑定 ----------
 document.querySelector('.supplier-sidebar').addEventListener('click', (event) => {
@@ -883,6 +1155,9 @@ $('#welcome-add').addEventListener('click', () => openSiteDialog(null, 'supplier
 $('#close-site-dialog').addEventListener('click', closeSiteDialog)
 elements.form.addEventListener('submit', (event) => { event.preventDefault(); saveSiteFromDialog({ sync: false }) })
 elements.saveSyncSite.addEventListener('click', () => saveSiteFromDialog({ sync: true }))
+elements.testLoginBtn.addEventListener('click', testLoginFromDialog)
+elements.siteModePassword.addEventListener('change', () => setSiteLoginMode('password'))
+elements.siteModeToken.addEventListener('change', () => setSiteLoginMode('token'))
 elements.wizardOpen.addEventListener('click', openWizard)
 elements.importOpen.addEventListener('click', openImportDialog)
 elements.syncCurrent.addEventListener('click', () => selectedSite() && refreshSite(selectedSite().id))
@@ -908,4 +1183,11 @@ elements.exportAll.addEventListener('click', () => downloadJson({ exported_at: n
 elements.togglePassword.addEventListener('click', () => { const visible = elements.sitePassword.type === 'text'; elements.sitePassword.type = visible ? 'password' : 'text'; elements.togglePassword.textContent = visible ? '查看' : '隐藏' })
 function downloadJson(data, filename) { if (!data) return; const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = filename; link.click(); URL.revokeObjectURL(link.href); showToast('JSON 已导出') }
 
+// ---------- 对比分析绑定 ----------
+elements.openCompare.addEventListener('click', () => switchMainView('compare'))
+elements.compareBack.addEventListener('click', () => switchMainView('workbench'))
+elements.compareTabs.addEventListener('click', (event) => { const button = event.target.closest('[data-compare-view]'); if (!button) return; compareView = button.dataset.compareView; renderCompare() })
+elements.compareSearch.addEventListener('input', renderCompare)
+
 loadSites()
+loadOfficialPrices()

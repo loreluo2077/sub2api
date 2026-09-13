@@ -10,6 +10,7 @@ const host = '127.0.0.1'
 const port = Number(process.env.GROUP_SYNC_PORT || 4178)
 const publicDirectory = fileURLToPath(new URL('./public/', import.meta.url))
 const databasePath = fileURLToPath(new URL('./data.db', import.meta.url))
+const officialPricePath = fileURLToPath(new URL('../../backend/resources/model-pricing/model_prices_and_context_window.json', import.meta.url))
 const maximumBodySize = 64 * 1024
 
 const contentTypes = {
@@ -28,6 +29,7 @@ db.exec(`
     base_url TEXT NOT NULL,
     email TEXT NOT NULL DEFAULT '',
     password TEXT NOT NULL DEFAULT '',
+    access_token TEXT NOT NULL DEFAULT '',
     balance REAL,
     username TEXT DEFAULT '',
     fetched_at TEXT,
@@ -42,6 +44,7 @@ if (!siteColumns.has('balance')) db.exec('ALTER TABLE sites ADD COLUMN balance R
 if (!siteColumns.has('username')) db.exec('ALTER TABLE sites ADD COLUMN username TEXT')
 if (!siteColumns.has('fetched_at')) db.exec('ALTER TABLE sites ADD COLUMN fetched_at TEXT')
 if (!siteColumns.has('rmb_per_usd')) db.exec('ALTER TABLE sites ADD COLUMN rmb_per_usd REAL DEFAULT 7.0')
+if (!siteColumns.has('access_token')) db.exec("ALTER TABLE sites ADD COLUMN access_token TEXT DEFAULT ''")
 db.exec('DROP TABLE IF EXISTS results')
 db.exec('DROP TABLE IF EXISTS key_records')
 
@@ -54,6 +57,7 @@ function siteToDto(row) {
     base_url: row.base_url,
     email: row.email,
     has_password: Boolean(row.password),
+    has_token: Boolean(row.access_token),
     balance: row.balance,
     username: row.username,
     fetched_at: row.fetched_at,
@@ -75,16 +79,17 @@ function dbGetSite(id) {
 function dbListSites() {
   return db.prepare('SELECT * FROM sites ORDER BY created_at ASC').all()
 }
-function dbUpsertSite({ id, kind, name, base_url, email, password, rmb_per_usd }) {
+function dbUpsertSite({ id, kind, name, base_url, email, password, access_token, rmb_per_usd }) {
   const now = new Date().toISOString()
   const existing = dbGetSite(id)
   const rate = rmb_per_usd !== undefined ? normalizeRmbPerUsd(rmb_per_usd) : (existing ? normalizeRmbPerUsd(existing.rmb_per_usd) : 7.0)
+  const token = access_token !== undefined ? String(access_token) : (existing ? existing.access_token : '')
   if (existing) {
-    db.prepare('UPDATE sites SET name = ?, base_url = ?, email = ?, password = ?, rmb_per_usd = ?, updated_at = ? WHERE id = ?')
-      .run(name, base_url, email, password, rate, now, id)
+    db.prepare('UPDATE sites SET name = ?, base_url = ?, email = ?, password = ?, access_token = ?, rmb_per_usd = ?, updated_at = ? WHERE id = ?')
+      .run(name, base_url, email, password, token, rate, now, id)
   } else {
-    db.prepare('INSERT INTO sites (id, kind, name, base_url, email, password, rmb_per_usd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id, kind, name, base_url, email, password, rate, now, now)
+    db.prepare('INSERT INTO sites (id, kind, name, base_url, email, password, access_token, rmb_per_usd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, kind, name, base_url, email, password, token, rate, now, now)
   }
   return dbGetSite(id)
 }
@@ -105,6 +110,28 @@ function dbSetSummary(id, { balance, username, fetchedAt }) {
 }
 function dbDeleteSite(id) {
   db.prepare('DELETE FROM sites WHERE id = ?').run(id)
+}
+
+// ---------- 官方价目表（本地文件，USD/每 token） ----------
+let officialPriceMap = {}
+try {
+  const raw = await readFile(officialPricePath, 'utf8')
+  const entries = JSON.parse(raw)
+  for (const [name, entry] of Object.entries(entries)) {
+    officialPriceMap[name.toLowerCase()] = {
+      input: entry.input_cost_per_token != null ? entry.input_cost_per_token * 1_000_000 : null,
+      output: entry.output_cost_per_token != null ? entry.output_cost_per_token * 1_000_000 : null,
+      cacheWrite: entry.cache_creation_input_token_cost != null ? entry.cache_creation_input_token_cost * 1_000_000 : null,
+      cacheRead: entry.cache_read_input_token_cost != null ? entry.cache_read_input_token_cost * 1_000_000 : null,
+    }
+  }
+  console.log(`已加载官方价目表：${Object.keys(officialPriceMap).length} 个模型`)
+} catch (error) {
+  console.log(`官方价目表加载失败（将使用 model_plaza 数据）：${error?.message || error}`)
+}
+
+async function handleOfficialPrices(request, response) {
+  return sendJson(response, 200, { ok: true, prices: officialPriceMap })
 }
 
 // ---------- 登录会话（向导两阶段用） ----------
@@ -202,7 +229,7 @@ function authHeaders(accessToken) {
   return { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }
 }
 
-// 解析凭据：优先使用站点库中的账号密码，其次使用请求内联传入的
+// 解析凭据：优先使用站点库中的账号密码/token，其次使用请求内联传入的
 function resolveCredentials(input) {
   if (input.siteId) {
     const site = dbGetSite(String(input.siteId))
@@ -212,6 +239,7 @@ function resolveCredentials(input) {
       baseUrl: normalizeBaseUrl(site.base_url),
       email: String(input.email || site.email || '').trim(),
       password: String(input.password || site.password || ''),
+      accessToken: String(input.access_token || site.access_token || ''),
     }
   }
   return {
@@ -219,11 +247,21 @@ function resolveCredentials(input) {
     baseUrl: normalizeBaseUrl(input.baseUrl),
     email: String(input.email || '').trim(),
     password: String(input.password || ''),
+    accessToken: String(input.access_token || ''),
   }
 }
 
-// 登录后若有新的邮箱/密码，则回写站点库
-function persistCredentials(siteId, input, baseUrl, email, password) {
+// 获取鉴权头：优先用 access_token，其次用用户名密码登录
+async function resolveAuthHeaders(credentials) {
+  if (credentials.accessToken) {
+    return authHeaders(credentials.accessToken)
+  }
+  const accessToken = await performLogin(credentials.baseUrl, credentials.email, credentials.password)
+  return authHeaders(accessToken)
+}
+
+// 登录后若有新的邮箱/密码/token，则回写站点库
+function persistCredentials(siteId, input, baseUrl, email, password, accessToken) {
   if (!siteId) return
   const updates = {}
   const name = String(input.name || input.supplierName || '').trim()
@@ -231,6 +269,7 @@ function persistCredentials(siteId, input, baseUrl, email, password) {
   if (input.baseUrl) updates.base_url = normalizeBaseUrl(input.baseUrl)
   if (email) updates.email = email
   if (password) updates.password = password
+  if (accessToken) updates.access_token = accessToken
   if (Object.keys(updates).length) dbUpdateSite(siteId, updates)
 }
 
@@ -298,6 +337,8 @@ const collectDefinitions = [
   { key: 'model_plaza', path: '/api/v1/model-plaza', optional: true },
   { key: 'usage_snapshot', path: '/api/v1/usage/dashboard/snapshot-v2?include_trend=true&include_model_stats=true&include_group_stats=true', optional: true },
   { key: 'usage_stats', path: '/api/v1/usage/dashboard/stats', optional: true },
+  { key: 'usage_logs', path: '/api/v1/usage?page=1&page_size=100&sort_by=created_at&sort_order=desc', optional: true },
+  { key: 'usage_logs_page2', path: '/api/v1/usage?page=2&page_size=100&sort_by=created_at&sort_order=desc', optional: true },
   { key: 'subscription_summary', path: '/api/v1/subscriptions/summary', optional: true },
   { key: 'subscription_progress', path: '/api/v1/subscriptions/progress', optional: true },
   { key: 'subscriptions', path: '/api/v1/subscriptions/active', optional: true },
@@ -330,6 +371,7 @@ async function handleSites(request, response) {
         base_url: normalizeBaseUrl(input.baseUrl),
         email: String(input.email || '').trim(),
         password: String(input.password || ''),
+        access_token: input.access_token,
         rmb_per_usd: input.rmb_per_usd,
       })
       return sendJson(response, 200, { ok: true, site: siteToDto(dbGetSite(id)) })
@@ -345,6 +387,7 @@ async function handleSites(request, response) {
       if (input.baseUrl !== undefined) updates.base_url = normalizeBaseUrl(input.baseUrl)
       if (input.email !== undefined) updates.email = String(input.email).trim()
       if (input.password !== undefined) updates.password = String(input.password)
+      if (input.access_token !== undefined) updates.access_token = String(input.access_token)
       if (input.rmb_per_usd !== undefined) updates.rmb_per_usd = normalizeRmbPerUsd(input.rmb_per_usd)
       dbUpdateSite(id, updates)
       return sendJson(response, 200, { ok: true, site: siteToDto(dbGetSite(id)) })
@@ -367,9 +410,9 @@ async function handleSites(request, response) {
 async function handleCollect(request, response) {
   try {
     const input = await readRequestBody(request)
-    const { site, baseUrl, email, password } = resolveCredentials(input)
-    const accessToken = await performLogin(baseUrl, email, password)
-    const headers = authHeaders(accessToken)
+    const credentials = resolveCredentials(input)
+    const { site, baseUrl, email, password, accessToken } = credentials
+    const headers = await resolveAuthHeaders(credentials)
 
     const collected = await Promise.all(collectDefinitions.map(async (definition) => [
       definition.key,
@@ -388,8 +431,8 @@ async function handleCollect(request, response) {
     const name = site ? site.name : (String(input.name || input.supplierName || '').trim() || new URL(baseUrl).hostname)
     const kind = input.kind === 'target' ? 'target' : (site?.kind || 'supplier')
 
-    dbUpsertSite({ id: siteId, kind, name, base_url: baseUrl, email, password })
-    persistCredentials(siteId, input, baseUrl, email, password)
+    dbUpsertSite({ id: siteId, kind, name, base_url: baseUrl, email, password, access_token: accessToken })
+    persistCredentials(siteId, input, baseUrl, email, password, accessToken)
 
     const fetchedAt = new Date().toISOString()
     const summary = {
@@ -451,9 +494,9 @@ async function handlePrepareGroupKeys(request, response) {
     }
 
     // 阶段一：登录并获取分组（尚未创建 Key）
-    const { site, baseUrl, email, password } = resolveCredentials(input)
-    const accessToken = await performLogin(baseUrl, email, password)
-    const headers = authHeaders(accessToken)
+    const credentials = resolveCredentials(input)
+    const { site, baseUrl, email, password, accessToken } = credentials
+    const headers = await resolveAuthHeaders(credentials)
     const groupsData = await requestApi(`${baseUrl}/api/v1/groups/available`, { headers })
     const groups = Array.isArray(groupsData) ? groupsData : groupsData?.items || []
     const existingKeys = await fetchAllApiKeys(baseUrl, headers)
@@ -472,7 +515,7 @@ async function handlePrepareGroupKeys(request, response) {
       email,
       groups: enriched,
     })
-    if (site) persistCredentials(site.id, input, baseUrl, email, password)
+    if (site) persistCredentials(site.id, input, baseUrl, email, password, accessToken)
 
     sendJson(response, 200, {
       ok: true,
@@ -491,9 +534,9 @@ async function handlePrepareGroupKeys(request, response) {
 async function handleListKeys(request, response) {
   try {
     const input = await readRequestBody(request)
-    const { site, baseUrl, email, password } = resolveCredentials(input)
-    const accessToken = await performLogin(baseUrl, email, password)
-    const headers = authHeaders(accessToken)
+    const credentials = resolveCredentials(input)
+    const { baseUrl } = credentials
+    const headers = await resolveAuthHeaders(credentials)
     const keys = await fetchAllApiKeys(baseUrl, headers)
 
     let groupNames = new Map()
@@ -525,17 +568,17 @@ async function handleListKeys(request, response) {
 async function handleImportKeys(request, response) {
   try {
     const input = await readRequestBody(request)
-    const { site, baseUrl, email, password } = resolveCredentials(input)
+    const credentials = resolveCredentials(input)
+    const { site, baseUrl, email, password, accessToken } = credentials
     const keysToImport = Array.isArray(input.keys) ? input.keys.filter((item) => item?.key) : []
     if (!keysToImport.length) throw new Error('没有可导入的 Key')
 
-    const accessToken = await performLogin(baseUrl, email, password)
-    const headers = authHeaders(accessToken)
+    const headers = await resolveAuthHeaders(credentials)
 
     const existingKeys = await fetchAllApiKeys(baseUrl, headers)
     const existingSet = new Set(existingKeys.map((item) => item.key))
 
-    if (site) persistCredentials(site.id, input, baseUrl, email, password)
+    if (site) persistCredentials(site.id, input, baseUrl, email, password, accessToken)
 
     const results = []
     for (const item of keysToImport) {
@@ -563,6 +606,21 @@ async function handleImportKeys(request, response) {
   } catch (error) {
     const message = error?.name === 'AbortError' ? '连接目标站超时' : error?.message || '导入 Key 失败'
     sendJson(response, 400, { ok: false, message })
+  }
+}
+
+// ---------- 测试登录/凭据 ----------
+async function handleTestLogin(request, response) {
+  try {
+    const input = await readRequestBody(request)
+    const credentials = resolveCredentials(input)
+    const headers = await resolveAuthHeaders(credentials)
+    // 实际调用受保护接口验证 token/登录是否有效
+    await requestApi(`${credentials.baseUrl}/api/v1/auth/me`, { headers })
+    sendJson(response, 200, { ok: true, message: '连接成功' })
+  } catch (error) {
+    const message = error?.name === 'AbortError' ? '连接目标站超时' : error?.message || '连接失败'
+    sendJson(response, 200, { ok: false, message })
   }
 }
 
@@ -596,6 +654,8 @@ const server = createServer(async (request, response) => {
 
     if (pathname === '/api/sites' || pathname.startsWith('/api/sites/')) return handleSites(request, response)
 
+    if (method === 'GET' && pathname === '/api/official-prices') return handleOfficialPrices(request, response)
+
     if (method === 'POST') {
       const routes = {
         '/api/collect': handleCollect,
@@ -603,6 +663,7 @@ const server = createServer(async (request, response) => {
         '/api/prepare-group-keys': handlePrepareGroupKeys,
         '/api/list-keys': handleListKeys,
         '/api/import-keys': handleImportKeys,
+        '/api/test-login': handleTestLogin,
       }
       const handler = routes[pathname]
       if (handler) return handler(request, response)

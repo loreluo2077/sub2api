@@ -609,6 +609,94 @@ async function handleImportKeys(request, response) {
   }
 }
 
+// ---------- 导入上游账号到目标站账号管理 ----------
+async function handleImportAccounts(request, response) {
+  try {
+    const input = await readRequestBody(request)
+    const credentials = resolveCredentials(input)
+    const { site, baseUrl, email, password, accessToken } = credentials
+    const keysToImport = Array.isArray(input.keys) ? input.keys.filter((item) => item?.key) : []
+    if (!keysToImport.length) throw new Error('没有可导入的 Key')
+
+    const sourceSite = input.sourceSiteId ? dbGetSite(String(input.sourceSiteId)) : null
+    if (!sourceSite) throw new Error('来源上游站点不存在，请先保存上游站点')
+    const sourceName = String(sourceSite.name || '').trim()
+    const sourceBaseUrl = normalizeBaseUrl(sourceSite.base_url)
+
+    const headers = await resolveAuthHeaders(credentials)
+
+    // 拉取目标站已有账号名做查重（接口对凭证脱敏，只能按账号名去重）
+    const existingNames = new Set()
+    const pageSize = 100
+    for (let page = 1; page <= 50; page += 1) {
+      const data = await requestApi(`${baseUrl}/api/v1/admin/accounts?page=${page}&page_size=${pageSize}`, { headers })
+      const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : []
+      for (const account of items) {
+        if (account && account.name) existingNames.add(String(account.name))
+      }
+      const total = data?.total != null ? Number(data.total) : items.length
+      if (!items.length || page * pageSize >= total) break
+    }
+
+    if (site) persistCredentials(site.id, input, baseUrl, email, password, accessToken)
+
+    const results = []
+    for (const item of keysToImport) {
+      const key = item.key
+      const accountName = sourceName ? `${sourceName}-${String(item.name || '').trim()}` : String(item.name || key)
+      if (existingNames.has(accountName)) {
+        results.push({ name: accountName, key, status: 'skipped' })
+        continue
+      }
+      try {
+        // 先用上游 Key 同步上游支持的模型（目标站会请求上游 GET /v1/models）
+        const synced = await requestApi(`${baseUrl}/api/v1/admin/accounts/models/sync-upstream-preview`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform: 'openai', type: 'apikey', base_url: sourceBaseUrl, api_key: key }),
+        })
+        const models = Array.isArray(synced?.models)
+          ? synced.models.filter((model) => typeof model === 'string' && model.trim()).map((model) => model.trim())
+          : []
+        const modelMapping = {}
+        for (const model of models) modelMapping[model] = model
+
+        await requestApi(`${baseUrl}/api/v1/admin/accounts`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: accountName,
+            platform: 'openai',
+            type: 'apikey',
+            credentials: {
+              base_url: sourceBaseUrl,
+              api_key: key,
+              model_mapping: Object.keys(modelMapping).length ? modelMapping : undefined,
+              pool_mode: true,
+              pool_mode_retry_count: 3,
+              pool_mode_retry_status_codes: [401, 403, 429],
+            },
+            group_ids: [],
+          }),
+        })
+        results.push({ name: accountName, key, models_count: models.length, status: 'imported' })
+      } catch (error) {
+        results.push({ name: accountName, key, status: 'failed', error: error?.message || '导入失败' })
+      }
+    }
+
+    sendJson(response, 200, {
+      ok: true,
+      target: site ? siteToDto(site) : { name: String(input.targetName || '').trim() || new URL(baseUrl).hostname, base_url: baseUrl, email },
+      source: { name: sourceName, base_url: sourceBaseUrl },
+      results,
+    })
+  } catch (error) {
+    const message = error?.name === 'AbortError' ? '连接目标站超时' : error?.message || '导入账号失败'
+    sendJson(response, 400, { ok: false, message })
+  }
+}
+
 // ---------- 测试登录/凭据 ----------
 async function handleTestLogin(request, response) {
   try {
@@ -663,6 +751,7 @@ const server = createServer(async (request, response) => {
         '/api/prepare-group-keys': handlePrepareGroupKeys,
         '/api/list-keys': handleListKeys,
         '/api/import-keys': handleImportKeys,
+        '/api/import-accounts': handleImportAccounts,
         '/api/test-login': handleTestLogin,
       }
       const handler = routes[pathname]

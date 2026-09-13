@@ -1,0 +1,30 @@
+server:
+    host: 127.0.0.1
+    port: 5498
+    mode: release
+database:
+    host: 127.0.0.1
+    port: 5499
+    user: postgres
+    password: ""
+    dbname: sub2api_test
+    sslmode: disable
+redis:
+    host: 127.0.0.1
+    port: 6379
+    username: ""
+    password: ""
+    db: 0
+    enable_tls: false
+jwt:
+    secret: b0e6bbd2d67255e3fbf370207bfbbc424704773c33f01d4211dd2c9f2eab3f75
+    expire_hour: 24
+default:
+    user_concurrency: 5
+    user_balance: 0
+    api_key_prefix: sk-
+    rate_multiplier: 1
+rate_limit:
+    requests_per_minute: 60
+    burst_size: 10
+timezone: Asia/Shanghai

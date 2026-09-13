@@ -51,7 +51,7 @@
         <div id="welcome-state" class="welcome-state">
           <div class="welcome-graphic"><span></span><span></span><span></span><span></span></div>
           <h2>把上游放到同一张工作台</h2>
-          <p>添加上游站点查看余额与分组，为每个分组生成 Key；再到目标站点把上游 Key 导入自己的账号。</p>
+          <p>添加上游站点查看余额与分组，为每个分组生成 Key；再到目标站点把上游 Key 导入自己的账号管理作为上游账号。</p>
           <button id="welcome-add" class="primary-button" type="button">添加第一个上游站点</button>
         </div>
 
@@ -255,7 +255,7 @@
 
     <dialog id="import-dialog" class="wizard-dialog">
       <div class="dialog-header">
-        <div><span class="eyebrow">导入账号</span><h2>把上游 Key 导入目标账号</h2></div>
+        <div><span class="eyebrow">导入账号</span><h2>把上游账号导入目标站账号管理</h2></div>
         <button id="close-import-dialog" class="icon-action" type="button" aria-label="关闭" title="关闭">×</button>
       </div>
 
@@ -266,7 +266,7 @@
         </div>
         <div class="transfer-box">
           <div class="transfer-pane">
-            <div class="transfer-pane-head"><h3>上游 Keys（实时）</h3><span id="import-available-count">0</span></div>
+            <div class="transfer-pane-head"><h3>上游账号（实时）</h3><span id="import-available-count">0</span></div>
             <div id="import-available" class="transfer-list"><div class="empty-view">请先选择来源上游</div></div>
             <div class="transfer-pane-actions">
               <button id="import-select-all" class="secondary-button" type="button">全选</button>
@@ -315,7 +315,7 @@
       </div>
 
       <div class="wizard-footer">
-        <p id="import-footer-note">已存在相同 Key 将自动跳过。</p>
+        <p id="import-footer-note">导入到目标站账号管理，账号名为「上游站名-Key名」，已存在同名账号将自动跳过。</p>
         <button id="import-cancel" class="secondary-button" type="button">取消</button>
         <button id="import-result-done" class="primary-button" type="button" hidden>完成</button>
         <button id="import-submit" class="primary-button" type="button">导入所选</button>

@@ -1030,7 +1030,7 @@ function renderTransfer() {
           <span class="transfer-item-meta"><strong>${escapeHtml(key.name || key.key)}</strong><span>${escapeHtml(key.group_name || '未分组')}</span></span>
           <code class="key-value">${maskKey(key.key)}</code>
         </label>`).join('')
-      : '<div class="empty-view">没有可导入的 Key</div>'
+      : '<div class="empty-view">没有可导入的账号</div>'
   }
   importDialog.selected.innerHTML = importDialog.selectedKeys.length
     ? importDialog.selectedKeys.map((key, index) => `<label class="transfer-item" data-sel-index="${index}">
@@ -1039,7 +1039,7 @@ function renderTransfer() {
         <code class="key-value">${maskKey(key.key)}</code>
       </label>`).join('')
     : '<div class="empty-view">尚未选择 Key</div>'
-  importDialog.submit.textContent = `导入所选 ${importDialog.selectedKeys.length} 把 Key`
+  importDialog.submit.textContent = `导入所选 ${importDialog.selectedKeys.length} 个上游账号`
 }
 
 function moveSelectedRight() {
@@ -1088,7 +1088,7 @@ async function submitImport() {
   importDialog.submit.disabled = true
   importDialog.submit.textContent = '导入中...'
   try {
-    const result = await apiRequest('/api/import-keys', { method: 'POST', body: JSON.stringify(payload) })
+    const result = await apiRequest('/api/import-accounts', { method: 'POST', body: JSON.stringify(payload) })
     importDialog.results = result.results || []
     if (payload.password || payload.access_token) {
       await apiRequest(`/api/sites/${target.id}`, { method: 'PUT', body: JSON.stringify({ password: payload.password || undefined, access_token: payload.access_token || undefined }) })
@@ -1100,7 +1100,7 @@ async function submitImport() {
     importDialog.error.hidden = false
   } finally {
     importDialog.submit.disabled = false
-    importDialog.submit.textContent = `导入所选 ${importDialog.selectedKeys.length} 把 Key`
+    importDialog.submit.textContent = `导入所选 ${importDialog.selectedKeys.length} 个上游账号`
   }
 }
 function renderImportResult() {
@@ -1108,20 +1108,21 @@ function renderImportResult() {
   const skipped = importDialog.results.filter((item) => item.status === 'skipped').length
   const failed = importDialog.results.filter((item) => item.status === 'failed').length
   importDialog.resultTitle.textContent = `导入完成：成功 ${imported}，跳过 ${skipped}，失败 ${failed}`
-  importDialog.resultSummary.textContent = imported + skipped + failed ? `导入 ${imported} 把 · 已存在跳过 ${skipped} 把 · 失败 ${failed} 把` : ''
+  importDialog.resultSummary.textContent = imported + skipped + failed ? `导入 ${imported} 个 · 已存在跳过 ${skipped} 个 · 失败 ${failed} 个` : ''
   if (!importDialog.results.length) {
-    importDialog.resultList.innerHTML = '<div class="empty-view">没有导入任何 Key</div>'
+    importDialog.resultList.innerHTML = '<div class="empty-view">没有导入任何账号</div>'
   } else {
-    importDialog.resultList.innerHTML = table(['Key 名称', 'Key', '结果'], importDialog.results.map((item) => {
+    importDialog.resultList.innerHTML = table(['账号名', 'Key', '结果'], importDialog.results.map((item) => {
       const ok = item.status !== 'failed'
-      return `<tr><td class="primary-text">${escapeHtml(item.name)}</td><td><code class="key-value">${maskKey(item.key)}</code></td><td><span class="tag ${ok ? item.status === 'imported' ? '' : 'blue' : 'red'}">${item.status === 'imported' ? '已导入' : item.status === 'skipped' ? '已存在跳过' : '失败'}</span>${item.status === 'failed' ? `<div class="secondary-text">${escapeHtml(item.error || '')}</div>` : ''}</td></tr>`
+      const modelInfo = item.models_count != null ? `<div class="secondary-text">同步 ${item.models_count} 个模型</div>` : ''
+      return `<tr><td class="primary-text">${escapeHtml(item.name)}${modelInfo}</td><td><code class="key-value">${maskKey(item.key)}</code></td><td><span class="tag ${ok ? item.status === 'imported' ? '' : 'blue' : 'red'}">${item.status === 'imported' ? '已导入' : item.status === 'skipped' ? '已存在跳过' : '失败'}</span>${item.status === 'failed' ? `<div class="secondary-text">${escapeHtml(item.error || '')}</div>` : ''}</td></tr>`
     }))
   }
   importDialog.body.hidden = true
   importDialog.resultPanel.hidden = false
   importDialog.submit.hidden = true
   importDialog.resultDone.hidden = false
-  importDialog.footerNote.textContent = '完成导入后可刷新目标站点查看 Keys。'
+  importDialog.footerNote.textContent = '完成导入后可刷新目标站点查看账号管理。'
 }
 
 importDialog.sourceSelect.addEventListener('change', () => {
